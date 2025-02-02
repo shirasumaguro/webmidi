@@ -1,48 +1,201 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ja">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MIDI Test</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Audio API - ドラム付きコード演奏</title>
 </head>
 <body>
-  <button onclick="playNote(60, 100, 500)">Play C4 (ド)</button>
-  <button onclick="playNote(62, 100, 500)">Play D4 (レ)</button>
-  <button onclick="playNote(64, 100, 500)">Play E4 (ミ)</button>
+    <h2>Web Audio API で 4拍子のコード演奏 + カスタムドラムパターン</h2>
+    
+    <p>コード進行とドラムパターンを入力し、「再生」ボタンを押してください。</p>
+    <label>コード進行: </label>
+    <input type="text" id="chordSequence" value="CM7 Am7 FM7 G7"><br>
 
-  <script>
-    let midiAccess = null;
-    let output = null;
+    <label>BPM: </label>
+    <input type="number" id="bpm" value="98" min="40" max="300"><br>
 
-    // MIDIアクセスの初期化
-    navigator.requestMIDIAccess().then(onMIDISuccess, onMIDIFailure);
+    <label>ドラムパターン（16ビート, `-` は休符）: </label>
+    <input type="text" id="drumPattern" value="BhhS --hh Bhhh h-S-" size="40"><br>
 
-    function onMIDISuccess(midi) {
-      midiAccess = midi;
-      const outputs = midiAccess.outputs.values();
-      for (let outputItem of outputs) {
-        output = outputItem; // 最初のMIDI出力デバイスを選択
-        console.log("MIDI output device selected:", output);
-      }
-    }
+    <button onclick="playChordSequence()">再生</button>
+    <button onclick="stopPlayback()">停止</button>
+    <button onclick="generateRandomDrumPattern()">ランダムドラム</button>
 
-    function onMIDIFailure() {
-      console.log("Could not access your MIDI devices.");
-    }
+    <script>
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        let activeOscillators = [];
+        let activeGains = [];
+        let timeouts = [];
 
-    // ノートを鳴らす関数
-    function playNote(note, velocity, duration) {
-      if (output) {
-        // ノートオンメッセージ [144, ノート番号, ベロシティ]
-        output.send([0x90, note, velocity]);
-        // ノートオフメッセージをdurationミリ秒後に送る
-        setTimeout(() => {
-          output.send([0x80, note, 0]); // ノートオフ
-        }, duration);
-      } else {
-        console.log("No MIDI output device available.");
-      }
-    }
-  </script>
+        function generateRandomDrumPattern() {
+            let pattern = [];
+            let prev = "";
+            let count = 0;
+
+            for (let i = 0; i < 16; i++) {
+                if (i % 4 === 0) {
+                    let drum = (prev === "B") ? "S" : "B";
+                    pattern.push(drum);
+                    prev = drum;
+                    count = 1;
+                } else if (count < 2 && Math.random() > 0.7) {
+                    pattern.push(prev);
+                    count++;
+                } else {
+                    pattern.push(Math.random() > 0.5 ? "h" : "-");
+                    count = 0;
+                }
+            }
+
+            document.getElementById("drumPattern").value = pattern.join("");
+            console.log("Generated Drum Pattern:", pattern.join(""));
+        }
+
+        function playChordSequence() {
+            stopPlayback();
+
+            let input = document.getElementById("chordSequence").value;
+            let chords = input.split(/\s+/);
+            let bpm = parseInt(document.getElementById("bpm").value, 10);
+            if (isNaN(bpm) || bpm < 40 || bpm > 300) bpm = 120;
+
+            let beatDuration = 60 / bpm;
+            let sixteenthNoteDuration = beatDuration / 4;
+            let measureDuration = beatDuration * 4;
+
+            let drumPattern = document.getElementById("drumPattern").value.replace(/\s/g, "").padEnd(16, "-").slice(0, 16);
+
+            if (drumPattern.length !== 16) {
+                alert("ドラムパターンは 16 文字で入力してください（B:バスドラム, S:スネア, h:ハイハット, -:休符）");
+                return;
+            }
+
+            let delay = 0;
+
+            chords.forEach((chord, index) => {
+                timeouts.push(setTimeout(() => {
+                    playChord(chord, bpm);
+                }, delay * 1000));
+
+                for (let i = 0; i < 16; i++) {
+                    let drum = drumPattern[i];
+                    let drumDelay = delay + (sixteenthNoteDuration * i);
+
+                    if (drum === "B") timeouts.push(setTimeout(playKick, drumDelay * 1000));
+                    if (drum === "S") timeouts.push(setTimeout(playSnare, drumDelay * 1000));
+                    if (drum === "h") timeouts.push(setTimeout(playHiHat, drumDelay * 1000));
+                }
+
+                delay += measureDuration;
+            });
+        }
+
+        function playChord(chordname, bpm) {
+            let note = -1, third = -1, fifth = -1, seventh = -1;
+            const gain = audioCtx.createGain();
+            gain.connect(audioCtx.destination);
+            gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+            activeGains.push(gain);
+
+            if (chordname.includes("C")) note = 60;
+            else if (chordname.includes("D")) note = 62;
+            else if (chordname.includes("E")) note = 64;
+            else if (chordname.includes("F")) note = 65;
+            else if (chordname.includes("G")) note = 67;
+            else if (chordname.includes("A")) note = 69;
+            else if (chordname.includes("B")) note = 71;
+
+            if (chordname.includes("M7")) seventh = note + 11;
+            else if (chordname.includes("7")) seventh = note + 10;
+
+            third = chordname.includes("m") ? note + 3 : note + 4;
+            fifth = note + 7;
+
+            let notes = [note, third, fifth];
+            if (seventh !== -1) notes.push(seventh);
+
+            let oscillators = notes.map(pitch => {
+                let osc = audioCtx.createOscillator();
+                osc.frequency.value = 440 * Math.pow(2, (pitch - 69) / 12);
+                osc.type = "sine";
+                osc.connect(gain);
+                osc.start(audioCtx.currentTime);
+                activeOscillators.push(osc);
+                return osc;
+            });
+
+            setTimeout(() => {
+                gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.1);
+                oscillators.forEach(osc => osc.stop(audioCtx.currentTime + 0.1));
+            }, (60 / bpm * 4 * 1000));
+        }
+
+        function stopPlayback() {
+            activeOscillators.forEach(osc => osc.stop());
+            activeGains.forEach(gain => gain.gain.setValueAtTime(0.01, audioCtx.currentTime));
+            timeouts.forEach(timeout => clearTimeout(timeout));
+
+            activeOscillators = [];
+            activeGains = [];
+            timeouts = [];
+        }
+        
+        function playKick() {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = "sine";
+            osc.frequency.setValueAtTime(120, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(50, audioCtx.currentTime + 0.1);
+            gain.gain.setValueAtTime(1, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.2);
+        }
+
+        function playSnare() {
+            const noise = audioCtx.createBufferSource();
+            const noiseBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.2, audioCtx.sampleRate);
+            const output = noiseBuffer.getChannelData(0);
+            for (let i = 0; i < noiseBuffer.length; i++) output[i] = Math.random() * 2 - 1;
+            noise.buffer = noiseBuffer;
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = "bandpass";
+            filter.frequency.value = 1500;
+            const gain = audioCtx.createGain();
+            gain.gain.setValueAtTime(1, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+            noise.connect(filter);
+            filter.connect(gain);
+            gain.connect(audioCtx.destination);
+            noise.start();
+            noise.stop(audioCtx.currentTime + 0.2);
+        }
+        
+        
+
+      
+
+        function playHiHat() {
+            const noise = audioCtx.createBufferSource();
+            const noiseBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.05, audioCtx.sampleRate);
+            const output = noiseBuffer.getChannelData(0);
+            for (let i = 0; i < noiseBuffer.length; i++) output[i] = Math.random() * 2 - 1;
+            noise.buffer = noiseBuffer;
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = "highpass";
+            filter.frequency.value = 5000;
+            const gain = audioCtx.createGain();
+            gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+            noise.connect(filter);
+            filter.connect(gain);
+            gain.connect(audioCtx.destination);
+            noise.start();
+            noise.stop(audioCtx.currentTime + 0.1);
+        }
+    </script>
 </body>
 </html>
